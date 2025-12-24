@@ -1,0 +1,11 @@
+fastapi
+uvicorn
+python-multipart
+pydantic
+numpy
+scikit-learn
+sentence-transformers
+python-dateutil
+pdfplumber
+pillow
+pytesseract
