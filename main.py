@@ -13,6 +13,7 @@ import json
 import hashlib
 import numpy as np
 from collections import defaultdict
+from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeoutError
 
 # -------------------------------------------------------------------
 # Optional OCR imports (graceful fallback if not installed)
@@ -39,7 +40,14 @@ try:
 except ImportError:
     EMBEDDING_MODEL_AVAILABLE = False
 
-EMB_MODEL = None  # lazy-loaded SentenceTransformer
+# Load SentenceTransformer model ONCE at startup
+EMB_MODEL = None
+if EMBEDDING_MODEL_AVAILABLE:
+    try:
+        EMB_MODEL = SentenceTransformer("sentence-transformers/all-MiniLM-L6-v2")
+    except Exception:
+        EMB_MODEL = None
+
 CLAUSE_PROTOTYPE_EMBEDDINGS: Dict[str, np.ndarray] = {}
 
 # -------------------------------------------------------------------
@@ -717,12 +725,7 @@ CLAUSE_PROTOTYPES = {
 
 
 def get_embedding_model():
-    """Lazy-load the sentence-transformers model, if available."""
-    global EMB_MODEL
-    if not EMBEDDING_MODEL_AVAILABLE:
-        return None
-    if EMB_MODEL is None:
-        EMB_MODEL = SentenceTransformer("sentence-transformers/all-MiniLM-L6-v2")
+    """Return the pre-loaded sentence-transformers model, if available."""
     return EMB_MODEL
 
 
@@ -739,11 +742,12 @@ def ensure_clause_prototype_embeddings(model) -> None:
         CLAUSE_PROTOTYPE_EMBEDDINGS[label] = np.array(embs)
 
 
-def classify_contract_clauses_semantic(
+def _classify_contract_clauses_semantic_inner(
     raw_text: str,
     max_paragraphs: int = 80,
     similarity_threshold: float = 0.6,
 ) -> List[Clause]:
+    """Inner function that performs semantic clause analysis (without timeout)."""
     model = get_embedding_model()
     if model is None:
         return []
@@ -794,6 +798,37 @@ def classify_contract_clauses_semantic(
         )
 
     return clauses
+
+
+def classify_contract_clauses_semantic(
+    raw_text: str,
+    max_paragraphs: int = 80,
+    similarity_threshold: float = 0.6,
+    timeout_seconds: float = 4.0,
+) -> List[Clause]:
+    """
+    Semantic clause classification with hard timeout.
+    If timeout is exceeded, returns empty list (fallback to rule-based).
+    """
+    model = get_embedding_model()
+    if model is None:
+        return []
+
+    try:
+        with ThreadPoolExecutor(max_workers=1) as executor:
+            future = executor.submit(
+                _classify_contract_clauses_semantic_inner,
+                raw_text,
+                max_paragraphs,
+                similarity_threshold,
+            )
+            return future.result(timeout=timeout_seconds)
+    except FutureTimeoutError:
+        # Timeout exceeded - skip semantic analysis, fall back to rule-based
+        return []
+    except Exception:
+        # Any other error - skip semantic analysis, fall back to rule-based
+        return []
 
 # -------------------------------------------------------------------
 # Clause post-processing (core filter + rounding)
@@ -868,14 +903,19 @@ def classify_contract_clauses(
     """
     Unified entry point:
 
-    1) Try semantic clause detection (if sentence-transformers is installed).
+    1) Try semantic clause detection (if sentence-transformers is installed and enabled).
     2) If not available or returns nothing, fall back to rule-based detection.
     3) Post-process to keep only the top N clauses per core type.
     """
-    semantic_clauses = classify_contract_clauses_semantic(
-        raw_text,
-        max_paragraphs=max_paragraphs,
-    )
+    # Check environment variable to enable/disable semantic analysis
+    enable_semantic = os.getenv("ENABLE_SEMANTIC_CLAUSE_ANALYSIS", "1") != "0"
+    
+    semantic_clauses: List[Clause] = []
+    if enable_semantic:
+        semantic_clauses = classify_contract_clauses_semantic(
+            raw_text,
+            max_paragraphs=max_paragraphs,
+        )
 
     base_clauses = semantic_clauses
     if not base_clauses:
