@@ -1381,7 +1381,7 @@ def assess_contract_risk(fields: ContractFields, raw_text: str) -> RiskAssessmen
 # Routes
 # -------------------------------------------------------------------
 
-@app.get("/health")
+@app.api_route("/health", methods=["GET", "HEAD"])
 def health_check():
     return {
         "status": "ok",
